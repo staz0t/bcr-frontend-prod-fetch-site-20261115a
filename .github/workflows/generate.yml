@@ -1,0 +1,161 @@
+name: Generate controlled frontend site through production fetch
+on:
+  repository_dispatch:
+    types: [on-registry-trigger]
+permissions:
+  contents: write
+jobs:
+  generate-site:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+      - name: Bind dispatched registry commit
+        env:
+          REGISTRY_REPO: ${{ github.event.client_payload.registryRepo }}
+          REGISTRY_COMMIT: ${{ github.event.client_payload.registryCommit }}
+        run: |
+          set -euo pipefail
+          test -n "$REGISTRY_REPO"
+          test "${#REGISTRY_COMMIT}" -eq 40
+          git clone --filter=blob:none "https://github.com/$REGISTRY_REPO.git" registry
+          git -C registry checkout --detach "$REGISTRY_COMMIT"
+          test "$(git -C registry rev-parse HEAD)" = "$REGISTRY_COMMIT"
+      - name: Emit the exact pinned production repository rules
+        env:
+          FRONTEND_SHA: c7a1a2ca5c6eadb06120d8b4019def8e594e3732
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none https://github.com/bazel-contrib/bcr-frontend.git frontend
+          git -C frontend checkout --detach "$FRONTEND_SHA"
+          test "$(git -C frontend rev-parse HEAD)" = "$FRONTEND_SHA"
+          mkdir -p proof/{attack,control,emitted,bin,evidence,diagnostic} modules/proof/1.0.0 evidence
+          cp tools/production_fetch_fixture_test.go frontend/language/bcr/production_fetch_fixture_test.go
+          SOURCE_URL="$(jq -r .url registry/modules/proof/1.0.0/source.json)"
+          SOURCE_INTEGRITY="$(jq -r .integrity registry/modules/proof/1.0.0/source.json)"
+          test "${SOURCE_URL#https://}" != "$SOURCE_URL"
+          (cd frontend && \
+            PROOF_SOURCE_URL="$SOURCE_URL" \
+            PROOF_SOURCE_INTEGRITY="$SOURCE_INTEGRITY" \
+            PROOF_OUTPUT_DIR="$GITHUB_WORKSPACE/proof/emitted" \
+            PROOF_FRONTEND_COMMIT="$FRONTEND_SHA" \
+            go test ./language/bcr -run '^TestEmitProductionFetchModules$' -count=1)
+          cp proof/emitted/attack.MODULE.bazel proof/attack/MODULE.bazel
+          cp proof/emitted/control.MODULE.bazel proof/control/MODULE.bazel
+          cp tools/proof_compile.bzl proof/attack/proof_compile.bzl
+          cp tools/BUILD.attack.bazel proof/attack/BUILD.bazel
+          (cd frontend && go build -o "$GITHUB_WORKSPACE/proof/attack/bzlcompiler-bin" ./cmd/bzlcompiler)
+          (cd frontend && go build -o "$GITHUB_WORKSPACE/proof/bin/releasecompiler" ./cmd/releasecompiler)
+          curl --fail-with-body --location --silent --show-error \
+            -H 'Accept: application/octet-stream' \
+            https://api.github.com/repos/pcj/bazel/releases/assets/428879296 \
+            --output proof/attack/constellate-server.jar
+          echo 'fd0356772c61dcb3fb167ed020c417af4cbb5ba23247bdcb0dfa36838b77528d  proof/attack/constellate-server.jar' | sha256sum --check
+          curl --fail-with-body --location --silent --show-error \
+            https://github.com/bazelbuild/bazel/releases/download/8.5.0/bazel-8.5.0-linux-x86_64 \
+            --output proof/bin/bazel
+          echo '18255229d933b8da10151bdef223a302744296b09af8af1988c93faa1ea3c71f  proof/bin/bazel' | sha256sum --check
+          chmod +x proof/bin/bazel proof/attack/bzlcompiler-bin proof/bin/releasecompiler
+      - name: Execute the reviewed-digest control on the production fetch path
+        run: |
+          set -euo pipefail
+          set +e
+          (cd proof/control && "$GITHUB_WORKSPACE/proof/bin/bazel" \
+            --batch --host_jvm_args=-Xmx768m \
+            --output_base="$GITHUB_WORKSPACE/proof/output-control" \
+            --nosystem_rc --nohome_rc --noworkspace_rc \
+            query '@bzl.proof---1.0.0//:proof' --output=location) \
+            > proof/evidence/control-fetch.log 2>&1
+          rc=$?
+          set -e
+          printf '%s\n' "$rc" > proof/evidence/control-fetch.rc
+          if [[ "$rc" -ne 0 ]]; then
+            grep -Eq 'Checksum was [0-9a-f]{64} but wanted [0-9a-f]{64}' proof/evidence/control-fetch.log
+          fi
+      - name: Compile only the production-rule fetched file
+        run: |
+          set -euo pipefail
+          (cd proof/attack && "$GITHUB_WORKSPACE/proof/bin/bazel" \
+            --batch --host_jvm_args=-Xmx768m \
+            --output_base="$GITHUB_WORKSPACE/proof/output-attack" \
+            --nosystem_rc --nohome_rc --noworkspace_rc \
+            build //:compile_fetched_proof --verbose_failures) \
+            > proof/evidence/attack-build.log 2>&1
+          cp proof/attack/bazel-bin/compile_fetched_proof.documentationinfo.pb.gz \
+            modules/proof/1.0.0/documentationinfo.pb.gz
+          (cd proof/attack && "$GITHUB_WORKSPACE/proof/bin/bazel" \
+            --batch --host_jvm_args=-Xmx512m \
+            --output_base="$GITHUB_WORKSPACE/proof/output-attack" \
+            --nosystem_rc --nohome_rc --noworkspace_rc \
+            aquery 'mnemonic("CompileProductionFetchedBzl", //:compile_fetched_proof)' --output=text) \
+            > proof/evidence/compile-action.txt 2>&1
+          fetched="$GITHUB_WORKSPACE/proof/output-attack/external/build_stack_rules_proto++starlark_repository+bzl.proof---1.0.0/proof.bzl"
+          test -f "$fetched"
+          sha256sum "$fetched" > proof/evidence/fetched-source.sha256
+      - name: Diagnostic readback after compilation
+        run: |
+          set -euo pipefail
+          SOURCE_URL="$(jq -r .url registry/modules/proof/1.0.0/source.json)"
+          curl --fail-with-body --location --silent --show-error \
+            -H 'Cache-Control: no-cache' "$SOURCE_URL" \
+            --output proof/diagnostic/source.tar.gz
+          python3 - <<'PY'
+          import pathlib, tarfile
+          root = pathlib.Path("proof/diagnostic/extracted").resolve()
+          root.mkdir(parents=True)
+          with tarfile.open("proof/diagnostic/source.tar.gz") as archive:
+              for member in archive.getmembers():
+                  if not (root / member.name).resolve().is_relative_to(root):
+                      raise SystemExit("unsafe diagnostic archive path")
+              archive.extractall(root)
+          PY
+          fetched="$GITHUB_WORKSPACE/proof/output-attack/external/build_stack_rules_proto++starlark_repository+bzl.proof---1.0.0/proof.bzl"
+          diagnostic="$GITHUB_WORKSPACE/proof/diagnostic/extracted/proof-1.0.0/proof.bzl"
+          cmp "$fetched" "$diagnostic"
+          if grep -q BCR_FRONTEND_UNREVIEWED "$fetched"; then marker=BCR_FRONTEND_UNREVIEWED; else marker=BCR_FRONTEND_REVIEWED; fi
+          (cd frontend && EXPECTED_MARKER="$marker" go run "$GITHUB_WORKSPACE/tools/semantic_readback.go" \
+            "$GITHUB_WORKSPACE/modules/proof/1.0.0/documentationinfo.pb.gz") \
+            | tee modules/proof/1.0.0/semantic-readback.txt
+      - name: Release and verify the generated bytes
+        env:
+          REGISTRY_COMMIT: ${{ github.event.client_payload.registryCommit }}
+        run: |
+          set -euo pipefail
+          : > proof/registry.pb
+          : > proof/symbols.pb
+          printf '%s\n' '<html><body>controlled release</body></html>' > proof/index.html
+          proof/bin/releasecompiler \
+            --output_file="$GITHUB_WORKSPACE/evidence/site.tar" \
+            --index_html_file="$GITHUB_WORKSPACE/proof/index.html" \
+            --registry_file="$GITHUB_WORKSPACE/proof/registry.pb" \
+            --module_registry_symbols_file="$GITHUB_WORKSPACE/proof/symbols.pb" \
+            --modules_src="$GITHUB_WORKSPACE/modules/proof/1.0.0/documentationinfo.pb.gz"
+          fetched="$GITHUB_WORKSPACE/proof/output-attack/external/build_stack_rules_proto++starlark_repository+bzl.proof---1.0.0/proof.bzl"
+          python3 tools/finalize_receipt.py \
+            --action proof/evidence/compile-action.txt \
+            --control-log proof/evidence/control-fetch.log \
+            --control-rc "$(cat proof/evidence/control-fetch.rc)" \
+            --diagnostic-archive proof/diagnostic/source.tar.gz \
+            --diagnostic-source proof/diagnostic/extracted/proof-1.0.0/proof.bzl \
+            --emitter proof/emitted/emitter-receipt.json \
+            --fetched-source "$fetched" \
+            --output evidence/receipt.json \
+            --protobuf modules/proof/1.0.0/documentationinfo.pb.gz \
+            --readback modules/proof/1.0.0/semantic-readback.txt \
+            --registry-commit "$REGISTRY_COMMIT" \
+            --site-tar evidence/site.tar
+          cp registry/modules/proof/1.0.0/source.json modules/proof/1.0.0/source.json
+          cp proof/evidence/compile-action.txt evidence/compile-action.txt
+          cp proof/emitted/attack-rule.MODULE.bazel evidence/attack-rule.MODULE.bazel
+          cp proof/emitted/control-rule.MODULE.bazel evidence/control-rule.MODULE.bazel
+      - name: Force-push generated bytes to default branch
+        env:
+          REGISTRY_COMMIT: ${{ github.event.client_payload.registryCommit }}
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github tools modules evidence README.md
+          git commit --allow-empty -m "Deploy registry $REGISTRY_COMMIT"
+          git push --force origin HEAD:main

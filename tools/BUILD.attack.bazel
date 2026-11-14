@@ -1,0 +1,9 @@
+load(":proof_compile.bzl", "production_fetch_compile")
+
+production_fetch_compile(
+    name = "compile_fetched_proof",
+    compiler = ":bzlcompiler-bin",
+    java_interpreter = "/usr/bin/java",
+    server_jar = ":constellate-server.jar",
+    src = "@bzl.proof---1.0.0//:proof",
+)
