@@ -1,0 +1,33 @@
+OpenJDK 64-Bit Server VM warning: Options -Xverify:none and -noverify were deprecated in JDK 13 and will likely be removed in a future release.
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: target //:compile_fetched_proof (1 packages loaded, 0 targets configured)
+INFO: Analyzed target //:compile_fetched_proof (6 packages loaded, 13 targets configured).
+INFO: Found 1 target...
+action 'Compiling the Bazel-fetched Starlark file //:compile_fetched_proof'
+  Mnemonic: CompileProductionFetchedBzl
+  Target: //:compile_fetched_proof
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 624cd69d3b859bcda49ab967a9ac786fe18c15d9d246a3190101d1cc83d70fc6
+  Inputs: [bzlcompiler-bin, constellate-server.jar, external/build_stack_rules_proto++starlark_repository+bzl.proof---1.0.0/proof.bzl]
+  Outputs: [bazel-out/k8-fastbuild/bin/compile_fetched_proof.documentationinfo.pb.gz]
+  Command Line: (exec ./bzlcompiler-bin \
+    --output_file \
+    bazel-out/k8-fastbuild/bin/compile_fetched_proof.documentationinfo.pb.gz \
+    --java_interpreter_file \
+    /usr/bin/java \
+    --server_jar_file \
+    constellate-server.jar \
+    --log_file \
+    /tmp/bcr-production-fetch-bzlcompiler.log \
+    '--bzl_file=proof|@@build_stack_rules_proto++starlark_repository+bzl.proof---1.0.0//:proof|external/build_stack_rules_proto++starlark_repository+bzl.proof---1.0.0/proof.bzl' \
+    '--module_dep=proof:NONE' \
+    external/build_stack_rules_proto++starlark_repository+bzl.proof---1.0.0/proof.bzl)
+# Configuration: e8494724f8baac23aca058d3505bda14b53b5306128c401b729b89c7aeb7b13c
+# Execution platform: @@platforms//host:host
+
+INFO: Elapsed time: 1.898s, Critical Path: 0.00s
+INFO: 0 processes.
+INFO: Build completed successfully, 0 total actions
