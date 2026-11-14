@@ -28,6 +28,6 @@ action 'Compiling the Bazel-fetched Starlark file //:compile_fetched_proof'
 # Configuration: e8494724f8baac23aca058d3505bda14b53b5306128c401b729b89c7aeb7b13c
 # Execution platform: @@platforms//host:host
 
-INFO: Elapsed time: 1.898s, Critical Path: 0.00s
+INFO: Elapsed time: 2.630s, Critical Path: 0.00s
 INFO: 0 processes.
 INFO: Build completed successfully, 0 total actions
